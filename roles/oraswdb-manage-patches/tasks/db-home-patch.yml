@@ -38,20 +38,39 @@
   tags:
     - ocmconfig
 
+- name: db-opatch | Check patches
+  shell: "{{ oracle_home_db}}/OPatch/opatch lsinv -oh {{ oracle_home_db}}"
+  become: yes
+  become_user: "{{ oracle_user }}"
+  changed_when: False
+  register: dbhome_patches_upi
+
+- name: db-opatch | Read currently installed patch ids and unique patch ids
+  set_fact:
+    plist: '{{ ("[" +
+      (dbhome_patches_upi.stdout
+      | regex_replace("Patch\s+([0-9]+).*?\nUnique Patch ID:\s+([0-9]+).*", "{patchid: \1, upi: \2}")
+      | regex_findall("{patchid: [0-9]+, upi: [0-9]+}")
+      | join(",")
+      ) + "]") | from_yaml }}'
+
+- debug:
+    var: plist
+    verbosity: 1
+    
 - name: db-opatch | Remove unwanted patches from DB
   oracle_opatch:
       oracle_home={{ oracle_home_db }}
-      patch_base={{ oracle_patch_install }}/{{ db_version}}/{{ item.path | default (item.patchid)}}/
-      patch_id={{item.patchid}}
-      patch_version={{ item.patchversion |default(omit)}}
+      patch_base={{ oracle_patch_install }}/{{ db_version}}/{{ item.0.path | default (item.0.patchid)}}/
+      patch_id={{item.0.patchid}}
+      patch_version={{ item.0.patchversion |default(omit)}}
       opatchauto=False
       conflict_check=True
-      stop_processes={{item.stop_processes |default(False)}}
+      stop_processes={{item.0.stop_processes |default(False)}}
       ocm_response_file={{ ocm_response_file | default(omit)}}
       output=verbose
-      state={{ item.state}}
-  with_items:
-      - "{{db_homes_config[dbh.home]['opatch']}}"
+      state={{ item.0.state}}
+  loop: "{{db_homes_config[dbh.home]['opatch'] | product(plist | default([])) | list}} "
   become: yes
   become_user: "{{ oracle_user }}"
   tags:
@@ -59,7 +78,9 @@
   when:
     - apply_patches_db|bool
     - db_homes_config[dbh.home]['opatch'] is defined
-    - item.state == "absent"
+    - item.0.patchid == item.1.patchid
+    - item.0.state == "absent"
+    - ( item.0.excludeUPI is not defined or item.0.excludeUPI != item.1.upi )
   register: psuapplym
 
 - name: db-opatch | Manage opatchauto patches for DB (non-gi)
@@ -125,7 +146,10 @@
   become_user: "{{ oracle_user }}"
   tags:
     - apply_patch_db
-  when: apply_patches_db and db_homes_config[dbh.home]['opatch'] is defined
+  when:
+    - apply_patches_db
+    - db_homes_config[dbh.home]['opatch'] is defined
+    - item.state == "present"
   register: psuapplym
 
 - name: db-opatch | Check patches
